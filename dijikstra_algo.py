@@ -29,6 +29,8 @@ def dijkstra(graph, start, goal):
     return None
 
 if __name__ == "__main__":
-    path, distance = dijkstra(graph, "A", "C")
+    start = input("Enter start node: ")
+    goal = input("Enter goal node: ")
+    path, distance = dijkstra(graph, start, goal)
     print("Shortest Path:", path)
     print("Distance:", distance)
