@@ -1,15 +1,32 @@
 from vosk import Model, KaldiRecognizer
-import pyaudio, json
+import pyaudio, json, os
 
-model = Model("model")
+MODEL_PATH = os.path.join(os.getcwd(), "model")
+model = Model(MODEL_PATH)
 recognizer = KaldiRecognizer(model, 16000)
+
+LETTER_MAP = {
+    "a": "A", "eh": "A", "hey": "A",
+    "b": "B", "bee": "B", "be": "B",
+    "c": "C", "see": "C", "sea": "C",
+    "d": "D","the": "D", "he": "D",
+    "e": "E", "ee": "E",
+    "if": "F", "ef": "F",
+    "g": "G", "gee": "G",
+    "it": "H", "aitch": "H",
+    "i": "I", "eye": "I","are you": "I",
+}
+
+def normalize_letter(text):
+    text = text.strip().lower()
+    return LETTER_MAP.get(text)
 
 def get_goal_from_voice():
     p = pyaudio.PyAudio()
     stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=8000)
     stream.start_stream()
 
-    print("Say destination...")
+    print("Say destination letter...")
 
     while True:
         data = stream.read(4000, exception_on_overflow=False)
@@ -19,24 +36,11 @@ def get_goal_from_voice():
                 return text.lower()
 
 if __name__ == "__main__":
-    print("Detecting position...")
-    frame = get_camera_frame()
-    start = detect_node_id(frame)
-
-    if start is None:
-        print("Could not detect position!")
-        exit()
-
     print("Listening for destination...")
-    voice_text = get_goal_from_voice()
-    goal = goal_map.get(voice_text)
+    heard = get_goal_from_voice()
+    clean_letter = normalize_letter(heard)
 
-    if goal is None:
-        print("Unknown destination command!")
-        exit()
-
-    path, distance = dijkstra(graph, start, goal)
-    print("Shortest Path:", path)
-    print("Distance:", distance)
-
-    follow_path(path)
+    if clean_letter:
+        print(f"Detected node letter: {clean_letter}")
+    else:
+        print(f"Unknown input: '{heard}' — try again.")
