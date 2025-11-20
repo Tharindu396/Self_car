@@ -42,5 +42,6 @@ if __name__ == "__main__":
 
     if clean_letter:
         print(f"Detected node letter: {clean_letter}")
+        print(f"Going to {clean_letter}.")
     else:
         print(f"Unknown input: '{heard}' — try again.")
