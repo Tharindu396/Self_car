@@ -1,56 +1,30 @@
 import cv2
 import numpy as np
 import RPi.GPIO as GPIO
+from MotorModule import Motor 
+
+motor= Motor(2,3,4,17,22,27)   
 
 # -------------------------
 # Motor GPIO Pins
 # -------------------------
-in1 = 4
-in2 = 17
-in3 = 27
-in4 = 22
-en1 = 23
-en2 = 24
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(en1, GPIO.OUT)
-GPIO.setup(en2, GPIO.OUT)
-GPIO.setup(in1, GPIO.OUT)
-GPIO.setup(in2, GPIO.OUT)
-GPIO.setup(in3, GPIO.OUT)
-GPIO.setup(in4, GPIO.OUT)
-
-p1 = GPIO.PWM(en1, 100)
-p2 = GPIO.PWM(en2, 100)
-p1.start(50)
-p2.start(50)
 
 # -------------------------
 # Helper functions
 # -------------------------
 def stop_motors():
-    GPIO.output(in1, GPIO.LOW)
-    GPIO.output(in2, GPIO.LOW)
-    GPIO.output(in3, GPIO.LOW)
-    GPIO.output(in4, GPIO.LOW)
-
+    motor.move(0,0)
+   
 def move_left():
-    GPIO.output(in1, GPIO.HIGH)
-    GPIO.output(in2, GPIO.LOW)
-    GPIO.output(in3, GPIO.LOW)
-    GPIO.output(in4, GPIO.HIGH)
-
+    motor.move(0.5, 0.3)
+    
 def move_straight():
-    GPIO.output(in1, GPIO.HIGH)
-    GPIO.output(in2, GPIO.LOW)
-    GPIO.output(in3, GPIO.HIGH)
-    GPIO.output(in4, GPIO.LOW)
+   motor.move(0.5,0)
 
 def move_right():
-    GPIO.output(in1, GPIO.LOW)
-    GPIO.output(in2, GPIO.HIGH)
-    GPIO.output(in3, GPIO.HIGH)
-    GPIO.output(in4, GPIO.LOW)
+    motor.move(0.5, -0.3)
+    
 
 # -------------------------
 # Camera Setup
