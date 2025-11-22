@@ -6,6 +6,14 @@ import pytesseract
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
+# Try to import picamera2 for Raspberry Pi
+try:
+    from picamera2 import Picamera2
+    PICAMERA2_AVAILABLE = True
+except ImportError:
+    Picamera2 = None
+    PICAMERA2_AVAILABLE = False
+
 # ----------------------------------------
 # 1. LOAD GRAPH.JSON
 # ----------------------------------------
@@ -63,51 +71,90 @@ def dijkstra(graph, start, goal):
 def detect_start_node_from_camera():
     """
     Use OCR to detect start node from camera
+    Uses picamera2 on Raspberry Pi, falls back to OpenCV VideoCapture
     
     Returns:
         Detected node string or None
     """
-    cam = cv2.VideoCapture(0)
+    picam2 = None
+    cam = None
+    use_picamera2 = False
     
-    if not cam.isOpened():
-        print("Warning: Webcam not detected. Using manual input.")
-        return None
+    # Try picamera2 first (Raspberry Pi)
+    if PICAMERA2_AVAILABLE and Picamera2 is not None:
+        try:
+            picam2 = Picamera2()
+            config = picam2.create_video_configuration(
+                main={"size": (640, 480), "format": "RGB888"}
+            )
+            picam2.configure(config)
+            picam2.start()
+            use_picamera2 = True
+            print("Camera opened (picamera2). Press ESC to stop, SPACE to capture.")
+        except Exception as exc:
+            print(f"Warning: picamera2 not available ({exc}). Trying OpenCV...")
+            if picam2:
+                try:
+                    picam2.close()
+                except Exception:
+                    pass
+                picam2 = None
     
-    print("Webcam opened. Press ESC to stop, SPACE to capture.")
+    # Fallback to OpenCV VideoCapture
+    if not use_picamera2:
+        cam = cv2.VideoCapture(0)
+        if not cam.isOpened():
+            print("Warning: Webcam not detected. Using manual input.")
+            return None
+        print("Camera opened (OpenCV). Press ESC to stop, SPACE to capture.")
     
     text = ""
-    while True:
-        ret, frame = cam.read()
-        if not ret:
-            print("Failed to grab frame")
-            break
+    try:
+        while True:
+            if use_picamera2 and picam2:
+                # picamera2 returns RGB888
+                rgb_frame = picam2.capture_array()
+                # Convert RGB to BGR for display
+                frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+            else:
+                ret, frame = cam.read()
+                if not ret:
+                    print("Failed to grab frame")
+                    break
+                # Convert BGR to RGB for OCR
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Convert BGR to RGB for OCR
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Extract text from the frame
+            try:
+                text = pytesseract.image_to_string(rgb_frame)
+                text = text.strip().upper()
+            except Exception as e:
+                print(f"OCR Error: {e}")
+                break
 
-        # Extract text from the frame
-        try:
-            text = pytesseract.image_to_string(rgb_frame)
-            text = text.strip().upper()
-        except Exception as e:
-            print(f"OCR Error: {e}")
-            break
+            # Show camera feed with detected text
+            cv2.putText(frame, f"Detected: {text}", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.imshow("Live OCR - Press ESC to Exit, SPACE to Capture", frame)
 
-        # Show webcam feed with detected text
-        cv2.putText(frame, f"Detected: {text}", (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.imshow("Live OCR - Press ESC to Exit, SPACE to Capture", frame)
-
-        # Exit on ESC, capture on SPACE
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27:  # ESC
-            text = None
-            break
-        elif key == 32:  # SPACE - capture current text
-            break
-    
-    cam.release()
-    cv2.destroyAllWindows()
+            # Exit on ESC, capture on SPACE
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:  # ESC
+                text = None
+                break
+            elif key == 32:  # SPACE - capture current text
+                break
+    finally:
+        # Cleanup
+        if use_picamera2 and picam2:
+            try:
+                picam2.stop()
+                picam2.close()
+            except Exception:
+                pass
+        elif cam:
+            cam.release()
+        cv2.destroyAllWindows()
     
     return text
 

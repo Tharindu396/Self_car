@@ -27,24 +27,75 @@ def move_right():
     
 
 # -------------------------
-# Camera Setup
+# Camera Setup - Using picamera2 with OpenCV fallback
 # -------------------------
-cap = cv2.VideoCapture("libcamerasrc ! videoconvert ! appsink", cv2.CAP_GSTREAMER)
+# Try picamera2 first (Raspberry Pi)
+picam2 = None
+cap = None
+use_picamera2 = False
+frame_width = 160
+frame_height = 120
 
-cap.set(3, 160)  # width
-cap.set(4, 120)  # height
+try:
+    from picamera2 import Picamera2
+    picam2 = Picamera2()
+    config = picam2.create_video_configuration(
+        main={"size": (frame_width, frame_height), "format": "RGB888"}
+    )
+    picam2.configure(config)
+    picam2.start()
+    use_picamera2 = True
+    print(f"[CAMERA] Using picamera2 ({frame_width}x{frame_height})")
+except ImportError:
+    print("[WARN] picamera2 not available. Trying OpenCV VideoCapture...")
+    picam2 = None
+except Exception as exc:
+    print(f"[WARN] picamera2 initialization failed: {exc}")
+    print("[WARN] Falling back to OpenCV VideoCapture...")
+    if picam2:
+        try:
+            picam2.close()
+        except Exception:
+            pass
+        picam2 = None
 
-if not cap.isOpened():
-    print("Error: Cannot open camera")
-    GPIO.cleanup()
-    exit()
+# Fallback to OpenCV VideoCapture if picamera2 failed
+if not use_picamera2:
+    cap = cv2.VideoCapture(0)
+    if cap.isOpened():
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
+        print(f"[CAMERA] Using OpenCV VideoCapture")
+    else:
+        print("Error: Cannot open camera")
+        GPIO.cleanup()
+        exit()
+
+def read_frame():
+    """
+    Read a frame from camera (picamera2 or OpenCV).
+    Returns (success, frame) where frame is BGR format.
+    """
+    if use_picamera2 and picam2:
+        try:
+            # picamera2 returns RGB888 format
+            rgb_array = picam2.capture_array()
+            # Convert RGB to BGR for OpenCV compatibility
+            bgr_frame = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+            return True, bgr_frame
+        except Exception as exc:
+            print(f"[WARN] picamera2 capture failed: {exc}")
+            return False, None
+    elif cap:
+        return cap.read()
+    return False, None
 
 # -------------------------
 # Main Loop
 # -------------------------
 try:
     while True:
-        ret, frame = cap.read()
+        ret, frame = read_frame()
         if not ret or frame is None:
             print("Failed to grab frame")
             continue
@@ -105,6 +156,14 @@ except KeyboardInterrupt:
 
 finally:
     stop_motors()
-    cap.release()
+    # Cleanup camera
+    if use_picamera2 and picam2:
+        try:
+            picam2.stop()
+            picam2.close()
+        except Exception:
+            pass
+    elif cap:
+        cap.release()
     cv2.destroyAllWindows()
     GPIO.cleanup()
