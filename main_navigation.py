@@ -251,6 +251,7 @@ class LineFollower:
         base_speed: float = 0.45,
         turn_gain: float = 0.65,
         max_turn: float = 0.5,
+        show_display: bool = True,
     ):
         if not CV2_AVAILABLE or np is None:
             raise RuntimeError("OpenCV + NumPy are required for physical navigation mode.")
@@ -265,6 +266,8 @@ class LineFollower:
         self.last_detection_time = time.time()
         self.lost_timeout = 0.75
         self.last_frame = None  # Store last frame for AprilTag detection
+        self.show_display = show_display
+        self.last_mask = None  # Store mask for display
 
         if MOTOR_AVAILABLE and Motor is not None:
             self.motor = Motor(2, 3, 4, 17, 22, 27)
@@ -305,32 +308,64 @@ class LineFollower:
             print("[WARN] Failed to grab frame from camera.")
             self.motor.stop()
             self.last_frame = None
+            self.last_mask = None
             return False
-
-        # Store frame for AprilTag detection
-        self.last_frame = frame.copy()
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.low_hsv, self.high_hsv)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Invert mask so black areas become white for display
+        inverted_mask = cv2.bitwise_not(mask)
+        self.last_mask = inverted_mask.copy()
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
         if contours:
-            largest = max(contours, key=cv2.contourArea)
-            M = cv2.moments(largest)
+            c = max(contours, key=cv2.contourArea)
+            M = cv2.moments(c)
             if M["m00"] != 0:
                 cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
                 error = (cx - (self.frame_width / 2)) / max(self.frame_width / 2, 1)
                 turn = -error * self.turn_gain
                 turn = max(-self.max_turn, min(self.max_turn, turn))
                 self.motor.move(self.base_speed, turn)
                 self.last_detection_time = time.time()
+                
+                # Draw green contours on black road areas
+                if self.show_display:
+                    # Draw green contour on the detected black road
+                    cv2.drawContours(frame, [c], -1, (0, 255, 0), 2)
+                    # Draw white circle at center point
+                    cv2.circle(frame, (cx, cy), 5, (255, 255, 255), -1)
+                
+                # Store frame AFTER drawing so the drawn version is displayed
+                self.last_frame = frame.copy()
+                
                 return True
+        
+        # Store frame even when no contours detected
+        self.last_frame = frame.copy()
 
         if time.time() - self.last_detection_time > self.lost_timeout:
             print("[WARN] Line lost - stopping motors.")
             self.motor.stop()
 
         return False
+
+    def display_frames(self):
+        """Display mask and frame windows if display is enabled."""
+        if not self.show_display or not CV2_AVAILABLE or cv2 is None:
+            return
+        
+        try:
+            if self.last_mask is not None and self.last_frame is not None:
+                # Mask already inverted - black areas show as white
+                cv2.imshow("Mask", self.last_mask)
+                cv2.imshow("Frame", self.last_frame)
+                # Non-blocking wait for window updates
+                cv2.waitKey(1)
+        except Exception as exc:  # pylint: disable=broad-except
+            # Silently handle display errors (e.g., headless mode)
+            pass
 
     def stop(self):
         self.motor.stop()
@@ -339,7 +374,7 @@ class LineFollower:
         self.stop()
         if self.camera:
             self.camera.release()
-        if cv2:
+        if CV2_AVAILABLE and cv2 is not None:
             cv2.destroyAllWindows()
 
 
@@ -376,7 +411,9 @@ class PhysicalNavigator:
             return
 
         print("\n=== Physical Navigation Mode ===")
-        print("Following shortest path using contour-based line detection.\n")
+        print("Following shortest path using contour-based line detection.")
+        print("Camera windows (Mask and Frame) and navigation map are displayed.")
+        print("Press 'q' in camera window to stop navigation.\n")
 
         try:
             for idx in range(len(self.nav.current_path) - 1):
@@ -410,7 +447,13 @@ class PhysicalNavigator:
             if dt <= 0:
                 continue
 
+            # Process line following and motor control
             self.line_follower.step()
+            
+            # Display camera windows (mask and frame)
+            self.line_follower.display_frames()
+            
+            # Update navigation position
             still_on_route = self.nav.update_position(self.route_speed_units, dt)
             
             # Check for AprilTag junction detection
@@ -418,6 +461,13 @@ class PhysicalNavigator:
             
             self._report_junction()
             self._update_visualizer()
+
+            # Check for quit key
+            if CV2_AVAILABLE and cv2 is not None:
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    print("\n[STOP] User pressed 'q' to quit")
+                    break
 
             if not still_on_route:
                 break
@@ -629,9 +679,11 @@ def run_physical_navigation(nav: StandaloneNavigation) -> bool:
     visualizer = None
     try:
         visualizer = NavigationVisualizer(nav)
-        print("Visualization enabled for physical navigation.")
+        print("[INFO] Uber-style map visualization enabled.")
+        print("[INFO] Camera windows (Mask and Frame) will be displayed.")
     except Exception as viz_exc:  # pylint: disable=broad-except
         print(f"[WARN] Could not start visualization: {viz_exc}")
+        print("[INFO] Camera windows will still be displayed.")
 
     driver = PhysicalNavigator(nav, follower, visualizer=visualizer)
     driver.follow_route()
