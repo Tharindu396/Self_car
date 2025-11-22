@@ -1,5 +1,5 @@
 import cv2
-import apriltag
+import pupil_apriltags as apriltag
 
 def main():
     # Initialize camera
@@ -10,12 +10,12 @@ def main():
     # Initialize the AprilTag detector
     detector = apriltag.Detector()
 
-    print("📷 AprilTag Scanner Started - Press 'q' to exit")
+    print("AprilTag Scanner Started - Press 'q' to exit")
 
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("❌ Failed to grab frame")
+            print("Failed to grab frame")
             break
 
         # Convert to grayscale (AprilTag works on grayscale)
@@ -46,7 +46,7 @@ def main():
             cv2.putText(frame, f"ID: {tag_id}", (int(cx), int(cy) - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
-            print(f"📍 Detected Tag ID: {tag_id}")
+            print(f"Detected Tag ID: {tag_id}")
 
         cv2.imshow("AprilTag Scanner", frame)
 

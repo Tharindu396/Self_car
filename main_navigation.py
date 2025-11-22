@@ -1,11 +1,389 @@
 """
-Main Navigation System - Integrates dijkstra_algo.py with navigation
-Works standalone without planner_part, lane_det, or manage.py
+Main Navigation System
+
+- Uses Dijkstra shortest path from dijikstra_algo.py
+- Provides visualization/text simulation modes
+- Adds physical navigation mode with contour-based line detection
 """
+
+import time
+from typing import List, Optional, Tuple
 
 from dijikstra_algo import dijkstra, graph, detect_start_node_from_camera
 from standalone_navigation import StandaloneNavigation, NavigationVisualizer
-import time
+
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    cv2 = None
+    np = None
+
+try:
+    from MotorModule import Motor
+    MOTOR_AVAILABLE = True
+except Exception as motor_exc:  # pylint: disable=broad-except
+    Motor = None
+    MOTOR_AVAILABLE = False
+    MOTOR_IMPORT_ERROR = motor_exc
+
+try:
+    import pupil_apriltags as apriltag
+    APRILTAG_AVAILABLE = True
+except ImportError:
+    apriltag = None
+    APRILTAG_AVAILABLE = False
+
+
+class DummyMotor:
+    """Fallback motor used on development machines without GPIO."""
+
+    def move(self, speed: float = 0.0, turn: float = 0.0, t: Optional[float] = None):
+        _ = t
+        print(f"[SIM MOTOR] speed={speed:.2f}, turn={turn:.2f}")
+
+    def stop(self, t: float = 0.0):
+        _ = t
+        print("[SIM MOTOR] stop")
+
+
+class AprilTagDetector:
+    """
+    AprilTag detector for junction identification.
+    Maps tag IDs to junction nodes 
+    """
+
+    def __init__(self):
+        if not APRILTAG_AVAILABLE or apriltag is None:
+            self.detector = None
+            self.enabled = False
+            print("[WARN] pupil_apriltags not available. AprilTag detection disabled.")
+        else:
+            try:
+                self.detector = apriltag.Detector()
+                self.enabled = True
+            except Exception as exc:  # pylint: disable=broad-except
+                self.detector = None
+                self.enabled = False
+                print(f"[WARN] Failed to initialize AprilTag detector: {exc}")
+
+        # Map AprilTag ID to junction node name
+        self.tag_to_junction = {
+            1: "J1",
+            2: "J2",
+            3: "J3",
+            4: "J4",
+        }
+
+    def detect_junction(self, frame) -> Optional[str]:
+        """
+        Detect AprilTag in frame and return corresponding junction node.
+
+        Args:
+            frame: OpenCV BGR frame
+
+        Returns:
+            Junction node name (e.g., "J1") if tag detected, None otherwise
+        """
+        if not self.enabled or self.detector is None or frame is None:
+            return None
+
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            results = self.detector.detect(gray)
+
+            if results:
+                # Get the first (or largest) detected tag
+                tag = results[0]
+                tag_id = tag.tag_id
+
+                if tag_id in self.tag_to_junction:
+                    junction = self.tag_to_junction[tag_id]
+                    return junction
+
+        except Exception as exc:  # pylint: disable=broad-except
+            # Silently fail - don't spam errors during line following
+            pass
+
+        return None
+
+
+class LineFollower:
+    """
+    Contour-based line follower reusing the logic from Line_det.py
+
+    - Detects the darkest line on the floor using HSV thresholding
+    - Adjusts the motor turn value to stay centered on the line
+    - Optionally provides frames for AprilTag detection
+    """
+
+    def __init__(
+        self,
+        camera_source: Optional[str] = "libcamerasrc ! videoconvert ! appsink",
+        frame_width: int = 160,
+        frame_height: int = 120,
+        base_speed: float = 0.45,
+        turn_gain: float = 0.65,
+        max_turn: float = 0.5,
+    ):
+        if not CV2_AVAILABLE or np is None:
+            raise RuntimeError("OpenCV + NumPy are required for physical navigation mode.")
+
+        self.base_speed = base_speed
+        self.turn_gain = turn_gain
+        self.max_turn = max_turn
+        self.low_hsv = np.array([0, 0, 0], dtype=np.uint8)
+        self.high_hsv = np.array([180, 255, 60], dtype=np.uint8)
+        self.frame_width = frame_width
+        self.frame_height = frame_height
+        self.last_detection_time = time.time()
+        self.lost_timeout = 0.75
+        self.last_frame = None  # Store last frame for AprilTag detection
+
+        if MOTOR_AVAILABLE and Motor is not None:
+            self.motor = Motor(2, 3, 4, 17, 22, 27)
+        else:
+            self.motor = DummyMotor()
+            if not MOTOR_AVAILABLE:
+                print(f"[WARN] MotorModule unavailable: {MOTOR_IMPORT_ERROR}")
+
+        self.cap = self._init_camera(camera_source)
+        self.is_active = self.cap is not None
+
+        if not self.is_active:
+            raise RuntimeError("Unable to initialize camera for line detection.")
+
+    def get_last_frame(self):
+        """Get the last captured frame for AprilTag detection."""
+        return self.last_frame
+
+    def _init_camera(self, primary_source: Optional[str]):
+        candidates: List[Tuple[object, Optional[int]]] = []
+        if primary_source:
+            candidates.append((primary_source, cv2.CAP_GSTREAMER))
+        candidates.append((0, cv2.CAP_ANY))
+        candidates.append((1, cv2.CAP_ANY))
+
+        for src, api in candidates:
+            if src is None:
+                continue
+            cap = cv2.VideoCapture(src, api) if api is not None else cv2.VideoCapture(src)
+            if cap is None:
+                continue
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_height)
+            if cap.isOpened():
+                return cap
+            cap.release()
+
+        return None
+
+    @property
+    def is_ready(self) -> bool:
+        return bool(self.cap and self.cap.isOpened())
+
+    def step(self) -> bool:
+        """
+        Process one camera frame and adjust motors.
+
+        Returns:
+            True if the line is currently detected, False otherwise.
+        """
+        if not self.is_ready:
+            return False
+
+        ret, frame = self.cap.read()
+        if not ret or frame is None:
+            print("[WARN] Failed to grab frame from camera.")
+            self.motor.stop()
+            self.last_frame = None
+            return False
+
+        # Store frame for AprilTag detection
+        self.last_frame = frame.copy()
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, self.low_hsv, self.high_hsv)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            M = cv2.moments(largest)
+            if M["m00"] != 0:
+                cx = int(M["m10"] / M["m00"])
+                error = (cx - (self.frame_width / 2)) / max(self.frame_width / 2, 1)
+                turn = -error * self.turn_gain
+                turn = max(-self.max_turn, min(self.max_turn, turn))
+                self.motor.move(self.base_speed, turn)
+                self.last_detection_time = time.time()
+                return True
+
+        if time.time() - self.last_detection_time > self.lost_timeout:
+            print("[WARN] Line lost - stopping motors.")
+            self.motor.stop()
+
+        return False
+
+    def stop(self):
+        self.motor.stop()
+
+    def cleanup(self):
+        self.stop()
+        if self.cap:
+            self.cap.release()
+        if cv2:
+            cv2.destroyAllWindows()
+
+
+class PhysicalNavigator:
+    """
+    Couples the virtual navigation path with real-world line following.
+    Uses AprilTags to identify and verify junction positions.
+    """
+
+    def __init__(
+        self,
+        nav: StandaloneNavigation,
+        line_follower: LineFollower,
+        route_speed_units: float = 0.35,
+        visualizer: Optional[NavigationVisualizer] = None,
+    ):
+        self.nav = nav
+        self.line_follower = line_follower
+        self.route_speed_units = max(0.1, route_speed_units)
+        self._last_instruction: Optional[str] = None
+        self.visualizer = visualizer
+        self.tag_detector = AprilTagDetector()
+        self._last_detected_junction: Optional[str] = None
+        self._junction_detection_cooldown = 2.0  # seconds between detections
+        self._last_junction_detection_time = 0.0
+
+    def follow_route(self):
+        if not self.line_follower.is_ready:
+            print("Line follower is not ready. Cannot start physical navigation.")
+            return
+
+        if not self.nav.current_path or len(self.nav.current_path) < 2:
+            print("Route is not set. Please compute a path first.")
+            return
+
+        print("\n=== Physical Navigation Mode ===")
+        print("Following shortest path using contour-based line detection.\n")
+
+        try:
+            for idx in range(len(self.nav.current_path) - 1):
+                start_node = self.nav.current_path[idx]
+                end_node = self.nav.current_path[idx + 1]
+                edge_length = self.nav.graph[start_node].get(end_node)
+                if edge_length is None or edge_length <= 0:
+                    print(f"[WARN] Missing edge data for {start_node}->{end_node}. Skipping segment.")
+                    continue
+
+                print(f"[SEGMENT] {start_node} -> {end_node} ({edge_length:.2f} units)")
+                self._follow_segment(edge_length)
+                print(f"[REACHED] {end_node}")
+
+            print("\n[DONE] Destination reached. Stopping motors.")
+        finally:
+            self.line_follower.cleanup()
+
+    def _follow_segment(self, edge_length: float):
+        target_duration = edge_length / self.route_speed_units
+        target_duration = max(target_duration, 0.1)
+
+        start_time = time.time()
+        last_time = start_time
+
+        while True:
+            now = time.time()
+            dt = now - last_time
+            last_time = now
+
+            if dt <= 0:
+                continue
+
+            self.line_follower.step()
+            still_on_route = self.nav.update_position(self.route_speed_units, dt)
+            
+            # Check for AprilTag junction detection
+            self._check_apriltag_junction()
+            
+            self._report_junction()
+            self._update_visualizer()
+
+            if not still_on_route:
+                break
+
+            if (now - start_time) >= target_duration:
+                break
+
+    def _check_apriltag_junction(self):
+        """
+        Check for AprilTag detection and update navigation position if junction detected.
+        Uses cooldown to prevent duplicate detections.
+        """
+        current_time = time.time()
+        
+        # Cooldown to prevent rapid re-detection of same tag
+        if current_time - self._last_junction_detection_time < self._junction_detection_cooldown:
+            return
+
+        frame = self.line_follower.get_last_frame()
+        if frame is None:
+            return
+
+        detected_junction = self.tag_detector.detect_junction(frame)
+        
+        if detected_junction and detected_junction != self._last_detected_junction:
+            self._last_detected_junction = detected_junction
+            self._last_junction_detection_time = current_time
+            
+            # Verify this junction is in our path
+            if self.nav.current_path and detected_junction in self.nav.current_path:
+                # Update car position to this junction
+                self._update_position_to_junction(detected_junction)
+                print(f"[APRILTAG] Detected junction: {detected_junction}")
+
+    def _update_position_to_junction(self, junction_node: str):
+        """
+        Update navigation position to match detected AprilTag junction.
+        This corrects any drift in the virtual position.
+        """
+        if not self.nav.current_path or junction_node not in self.nav.current_path:
+            return
+
+        # Find the junction in the path
+        junction_idx = self.nav.current_path.index(junction_node)
+        
+        # Update car position to be at this junction with 0 progress
+        if self.nav.car_position is None:
+            return
+            
+        self.nav.car_position.node = junction_node
+        self.nav.car_position.progress = 0.0
+        
+        # Update heading based on next node in path
+        if junction_idx + 1 < len(self.nav.current_path):
+            next_node = self.nav.current_path[junction_idx + 1]
+            self.nav.car_position.heading = self.nav._calculate_heading(junction_node, next_node)
+        
+        print(f"[POSITION CORRECTED] Car position updated to {junction_node}")
+
+    def _report_junction(self):
+        junction = self.nav.get_junction_decision()
+        if junction and junction.instruction != self._last_instruction:
+            print(f"[JUNCTION] {junction.instruction} ({junction.direction})")
+            self._last_instruction = junction.instruction
+
+    def _update_visualizer(self):
+        if self.visualizer:
+            try:
+                self.visualizer.update_and_draw()
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"[WARN] Visualizer update failed: {exc}")
+                self.visualizer = None
 
 
 def main():
@@ -40,10 +418,17 @@ def main():
         return
     
     # Choose mode
-    print("\nStep 4: Choose display mode")
+    print("\nStep 4: Choose run mode")
     print("  1. Text-only (console output)")
     print("  2. Visualization (Uber-style map)")
-    mode = input("Enter choice (1 or 2): ").strip()
+    print("  3. Physical car (line detection + motors)")
+    mode = input("Enter choice (1, 2, or 3): ").strip()
+
+    if mode == "3":
+        if run_physical_navigation(nav):
+            return
+        print("Physical mode unavailable. Falling back to text-only mode.\n")
+        mode = "1"
     
     if mode == "2":
         # Visualization mode
@@ -86,6 +471,8 @@ def main():
                     
             except KeyboardInterrupt:
                 print("\nStopped by user")
+            except Exception as loop_exc:  # catch other runtime errors inside the loop
+                print(f"[WARN] Visualization loop error: {loop_exc}")
             finally:
                 import matplotlib.pyplot as plt
                 plt.close('all')
@@ -125,6 +512,25 @@ def main():
             time.sleep(0.1)
 
 
+def run_physical_navigation(nav: StandaloneNavigation) -> bool:
+    """Start physical navigation mode if hardware is ready."""
+    try:
+        follower = LineFollower()
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}")
+        return False
+
+    visualizer = None
+    try:
+        visualizer = NavigationVisualizer(nav)
+        print("Visualization enabled for physical navigation.")
+    except Exception as viz_exc:  # pylint: disable=broad-except
+        print(f"[WARN] Could not start visualization: {viz_exc}")
+
+    driver = PhysicalNavigator(nav, follower, visualizer=visualizer)
+    driver.follow_route()
+    return True
+
 def quick_pathfinding():
     """Quick pathfinding without navigation tracking"""
     print("=== Quick Pathfinding ===\n")
@@ -148,4 +554,3 @@ if __name__ == "__main__":
         quick_pathfinding()
     else:
         main()
-
