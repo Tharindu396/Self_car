@@ -313,9 +313,7 @@ class LineFollower:
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.low_hsv, self.high_hsv)
-        # Invert mask so black areas become white for display
-        inverted_mask = cv2.bitwise_not(mask)
-        self.last_mask = inverted_mask.copy()
+        self.last_mask = mask.copy()
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
         if contours:
@@ -415,7 +413,10 @@ class PhysicalNavigator:
         print("Camera windows (Mask and Frame) and navigation map are displayed.")
         print("Press 'q' in camera window to stop navigation.\n")
 
+        virtual_navigation_complete = False
+        
         try:
+            # Follow the planned route segments
             for idx in range(len(self.nav.current_path) - 1):
                 start_node = self.nav.current_path[idx]
                 end_node = self.nav.current_path[idx + 1]
@@ -425,14 +426,22 @@ class PhysicalNavigator:
                     continue
 
                 print(f"[SEGMENT] {start_node} -> {end_node} ({edge_length:.2f} units)")
-                self._follow_segment(edge_length)
+                self._follow_segment(edge_length, stop_on_completion=False)
                 print(f"[REACHED] {end_node}")
 
-            print("\n[DONE] Destination reached. Stopping motors.")
+            print("\n[VIRTUAL NAVIGATION COMPLETE] Destination reached in virtual navigation.")
+            print("[PHYSICAL NAVIGATION] Continuing line following... Press 'q' to stop.\n")
+            virtual_navigation_complete = True
+            
+            # Continue physical navigation indefinitely after virtual navigation completes
+            self._continue_physical_navigation()
+            
+        except KeyboardInterrupt:
+            print("\n[STOP] Interrupted by user")
         finally:
             self.line_follower.cleanup()
 
-    def _follow_segment(self, edge_length: float):
+    def _follow_segment(self, edge_length: float, stop_on_completion: bool = True):
         target_duration = edge_length / self.route_speed_units
         target_duration = max(target_duration, 0.1)
 
@@ -453,8 +462,12 @@ class PhysicalNavigator:
             # Display camera windows (mask and frame)
             self.line_follower.display_frames()
             
-            # Update navigation position
-            still_on_route = self.nav.update_position(self.route_speed_units, dt)
+            # Update navigation position (only if stop_on_completion is True)
+            if stop_on_completion:
+                still_on_route = self.nav.update_position(self.route_speed_units, dt)
+            else:
+                # Still update position for visualization, but don't stop on completion
+                still_on_route = self.nav.update_position(self.route_speed_units, dt)
             
             # Check for AprilTag junction detection
             self._check_apriltag_junction()
@@ -467,13 +480,40 @@ class PhysicalNavigator:
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     print("\n[STOP] User pressed 'q' to quit")
+                    raise KeyboardInterrupt("User quit")
+
+            if stop_on_completion and not still_on_route:
+                break
+
+            if stop_on_completion and (now - start_time) >= target_duration:
+                break
+
+    def _continue_physical_navigation(self):
+        """
+        Continue physical line following indefinitely after virtual navigation completes.
+        Camera windows and visualization remain active.
+        """
+        print("[PHYSICAL NAVIGATION] Line following active. Press 'q' to stop.\n")
+        
+        while True:
+            # Process line following and motor control
+            self.line_follower.step()
+            
+            # Display camera windows (mask and frame)
+            self.line_follower.display_frames()
+            
+            # Update visualizer (keep showing final position)
+            self._update_visualizer()
+            
+            # Check for quit key
+            if CV2_AVAILABLE and cv2 is not None:
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    print("\n[STOP] User pressed 'q' to quit")
                     break
-
-            if not still_on_route:
-                break
-
-            if (now - start_time) >= target_duration:
-                break
+            
+            # Small delay to prevent excessive CPU usage
+            time.sleep(0.01)
 
     def _check_apriltag_junction(self):
         """
@@ -689,26 +729,9 @@ def run_physical_navigation(nav: StandaloneNavigation) -> bool:
     driver.follow_route()
     return True
 
-def quick_pathfinding():
-    """Quick pathfinding without navigation tracking"""
-    print("=== Quick Pathfinding ===\n")
-    
-    start = input("Enter start node: ").strip().upper()
-    goal = input("Enter goal node: ").strip().upper()
-    
-    path, distance = dijkstra(graph, start, goal)
-    
-    if path:
-        print(f"\nShortest Path: {' -> '.join(path)}")
-        print(f"Total Distance: {distance:.2f} units")
-    else:
-        print(f"\nNo path found from {start} to {goal}")
-
 
 if __name__ == "__main__":
     import sys
     
-    if len(sys.argv) > 1 and sys.argv[1] == "quick":
-        quick_pathfinding()
-    else:
+
         main()
