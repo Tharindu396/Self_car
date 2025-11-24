@@ -340,7 +340,7 @@ class StandaloneNavigation:
 
 
 class NavigationVisualizer:
-    """Visualizes navigation with Uber-style path display - FIXED VERSION"""
+    """Visualizes navigation with Uber-style path display """
     
     def __init__(self, nav: StandaloneNavigation):
         self.nav = nav

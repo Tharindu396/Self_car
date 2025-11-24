@@ -73,3 +73,27 @@ class Motor():
 
         if t > 0:
             sleep(t)
+
+    def move_left(self, speed=20):
+        self.pwmA.ChangeDutyCycle(speed)
+        self.pwmB.ChangeDutyCycle(speed)
+        GPIO.output(self.In1A, GPIO.HIGH)
+        GPIO.output(self.In2A, GPIO.LOW)
+        GPIO.output(self.In1B, GPIO.LOW)
+        GPIO.output(self.In2B, GPIO.HIGH)
+
+    def move_stright(self, speed=20):
+        self.pwmA.ChangeDutyCycle(speed)
+        self.pwmB.ChangeDutyCycle(speed)
+        GPIO.output(self.In1A, GPIO.HIGH)
+        GPIO.output(self.In2A, GPIO.LOW)
+        GPIO.output(self.In1B, GPIO.HIGH)
+        GPIO.output(self.In2B, GPIO.LOW)
+
+    def move_right(self, speed=20):
+        self.pwmA.ChangeDutyCycle(speed)
+        self.pwmB.ChangeDutyCycle(speed)
+        GPIO.output(self.In1A, GPIO.LOW)
+        GPIO.output(self.In2A, GPIO.HIGH)
+        GPIO.output(self.In1B, GPIO.HIGH)
+        GPIO.output(self.In2B, GPIO.LOW)

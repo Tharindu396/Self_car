@@ -44,17 +44,6 @@ except ImportError:
     APRILTAG_AVAILABLE = False
 
 
-class DummyMotor:
-    """Fallback motor used on development machines without GPIO."""
-
-    def move(self, speed: float = 0.0, turn: float = 0.0, t: Optional[float] = None):
-        _ = t
-        print(f"[SIM MOTOR] speed={speed:.2f}, turn={turn:.2f}")
-
-    def stop(self, t: float = 0.0):
-        _ = t
-        print("[SIM MOTOR] stop")
-
 
 class CameraWrapper:
     """
@@ -176,7 +165,7 @@ class CameraWrapper:
 class AprilTagDetector:
     """
     AprilTag detector for junction identification.
-    Maps tag IDs to junction nodes 
+    Maps tag IDs to junction nodes
     """
 
     def __init__(self):
@@ -259,8 +248,8 @@ class LineFollower:
         self.base_speed = base_speed
         self.turn_gain = turn_gain
         self.max_turn = max_turn
-        self.low_hsv = np.array([0, 0, 0], dtype=np.uint8)
-        self.high_hsv = np.array([180, 255, 60], dtype=np.uint8)
+        self.low_hsv = np.array([0,0,0])
+        self.high_hsv = np.array([180,255,90])
         self.frame_width = frame_width
         self.frame_height = frame_height
         self.last_detection_time = time.time()
@@ -270,11 +259,7 @@ class LineFollower:
         self.last_mask = None  # Store mask for display
 
         if MOTOR_AVAILABLE and Motor is not None:
-            self.motor = Motor(2, 3, 4, 17, 22, 27)
-        else:
-            self.motor = DummyMotor()
-            if not MOTOR_AVAILABLE:
-                print(f"[WARN] MotorModule unavailable: {MOTOR_IMPORT_ERROR}")
+            self.motor = Motor(2, 3, 4, 27, 17, 22)
 
         # Use CameraWrapper for picamera2/OpenCV compatibility
         try:
@@ -327,19 +312,28 @@ class LineFollower:
                 turn = max(-self.max_turn, min(self.max_turn, turn))
                 self.motor.move(self.base_speed, turn)
                 self.last_detection_time = time.time()
-                
+
                 # Draw green contours on black road areas
                 if self.show_display:
                     # Draw green contour on the detected black road
                     cv2.drawContours(frame, [c], -1, (0, 255, 0), 2)
                     # Draw white circle at center point
                     cv2.circle(frame, (cx, cy), 5, (255, 255, 255), -1)
-                
+
                 # Store frame AFTER drawing so the drawn version is displayed
                 self.last_frame = frame.copy()
-                
+                if cx >= 120:
+                    print("Turn Right")
+                    self.motor.move_right(50)
+                elif 40 < cx < 120:
+                    print("On Track!")
+                    self.motor.move_stright(25)
+                elif cx <= 40:
+                    print("Turn Left")
+                    self.motor.move_left(50)
+
                 return True
-        
+
         # Store frame even when no contours detected
         self.last_frame = frame.copy()
 
@@ -353,7 +347,7 @@ class LineFollower:
         """Display mask and frame windows if display is enabled."""
         if not self.show_display or not CV2_AVAILABLE or cv2 is None:
             return
-        
+
         try:
             if self.last_mask is not None and self.last_frame is not None:
                 # Mask already inverted - black areas show as white
@@ -414,7 +408,7 @@ class PhysicalNavigator:
         print("Press 'q' in camera window to stop navigation.\n")
 
         virtual_navigation_complete = False
-        
+
         try:
             # Follow the planned route segments
             for idx in range(len(self.nav.current_path) - 1):
@@ -432,10 +426,10 @@ class PhysicalNavigator:
             print("\n[VIRTUAL NAVIGATION COMPLETE] Destination reached in virtual navigation.")
             print("[PHYSICAL NAVIGATION] Continuing line following... Press 'q' to stop.\n")
             virtual_navigation_complete = True
-            
+
             # Continue physical navigation indefinitely after virtual navigation completes
             self._continue_physical_navigation()
-            
+
         except KeyboardInterrupt:
             print("\n[STOP] Interrupted by user")
         finally:
@@ -458,20 +452,20 @@ class PhysicalNavigator:
 
             # Process line following and motor control
             self.line_follower.step()
-            
+
             # Display camera windows (mask and frame)
             self.line_follower.display_frames()
-            
+
             # Update navigation position (only if stop_on_completion is True)
             if stop_on_completion:
                 still_on_route = self.nav.update_position(self.route_speed_units, dt)
             else:
                 # Still update position for visualization, but don't stop on completion
                 still_on_route = self.nav.update_position(self.route_speed_units, dt)
-            
+
             # Check for AprilTag junction detection
             self._check_apriltag_junction()
-            
+
             self._report_junction()
             self._update_visualizer()
 
@@ -494,24 +488,24 @@ class PhysicalNavigator:
         Camera windows and visualization remain active.
         """
         print("[PHYSICAL NAVIGATION] Line following active. Press 'q' to stop.\n")
-        
+
         while True:
             # Process line following and motor control
             self.line_follower.step()
-            
+
             # Display camera windows (mask and frame)
             self.line_follower.display_frames()
-            
+
             # Update visualizer (keep showing final position)
             self._update_visualizer()
-            
+
             # Check for quit key
             if CV2_AVAILABLE and cv2 is not None:
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     print("\n[STOP] User pressed 'q' to quit")
                     break
-            
+
             # Small delay to prevent excessive CPU usage
             time.sleep(0.01)
 
@@ -521,7 +515,7 @@ class PhysicalNavigator:
         Uses cooldown to prevent duplicate detections.
         """
         current_time = time.time()
-        
+
         # Cooldown to prevent rapid re-detection of same tag
         if current_time - self._last_junction_detection_time < self._junction_detection_cooldown:
             return
@@ -531,11 +525,11 @@ class PhysicalNavigator:
             return
 
         detected_junction = self.tag_detector.detect_junction(frame)
-        
+
         if detected_junction and detected_junction != self._last_detected_junction:
             self._last_detected_junction = detected_junction
             self._last_junction_detection_time = current_time
-            
+
             # Verify this junction is in our path
             if self.nav.current_path and detected_junction in self.nav.current_path:
                 # Update car position to this junction
@@ -552,19 +546,19 @@ class PhysicalNavigator:
 
         # Find the junction in the path
         junction_idx = self.nav.current_path.index(junction_node)
-        
+
         # Update car position to be at this junction with 0 progress
         if self.nav.car_position is None:
             return
-            
+
         self.nav.car_position.node = junction_node
         self.nav.car_position.progress = 0.0
-        
+
         # Update heading based on next node in path
         if junction_idx + 1 < len(self.nav.current_path):
             next_node = self.nav.current_path[junction_idx + 1]
             self.nav.car_position.heading = self.nav._calculate_heading(junction_node, next_node)
-        
+
         print(f"[POSITION CORRECTED] Car position updated to {junction_node}")
 
     def _report_junction(self):
@@ -590,29 +584,29 @@ def main():
     print("  - OCR to detect start position")
     print("  - Real-time position tracking")
     print("  - Junction decision making\n")
-    
+
     # Initialize navigation
     nav = StandaloneNavigation()
-    
+
     # Option 1: Use OCR to detect start node
     print("Step 1: Detecting start position...")
     start = detect_start_node_from_camera()
-    
+
     # Option 2: Manual input if OCR fails
     if start is None or start not in graph:
         print("\nOCR detection failed or invalid. Using manual input.")
         start = input("Enter start node (e.g., A, B, J1): ").strip().upper()
-    
+
     # Get destination
     print("\nStep 2: Enter destination")
     goal = input("Enter destination node (e.g., D, F, J4): ").strip().upper()
-    
+
     # Set route
     print("\nStep 3: Calculating route...")
     if not nav.set_route(start, goal):
         print("Failed to set route. Exiting.")
         return
-    
+
     # Choose mode
     print("\nStep 4: Choose run mode")
     print("  1. Text-only (console output)")
@@ -625,7 +619,7 @@ def main():
             return
         print("Physical mode unavailable. Falling back to text-only mode.\n")
         mode = "1"
-    
+
     if mode == "2":
         # Visualization mode
         try:
@@ -638,23 +632,23 @@ def main():
             print("  - Orange circles: Junctions")
             print("  - Yellow boxes: Junction instructions")
             print("\nClose the window to stop.\n")
-            
+
             # Simulate car movement
             speed = 0.5  # units per second
             running = True
-            
+
             try:
                 while running:
                     still_on_route = nav.update_position(speed, dt=0.1)
-                    
+
                     # Get junction decision
                     junction = nav.get_junction_decision()
                     if junction:
                         print(f"[JUNCTION] {junction.instruction}")
-                    
+
                     # Update visualization
                     viz.update_and_draw()
-                    
+
                     if not still_on_route:
                         print("\n[DONE] Reached destination!")
                         # Keep showing final state
@@ -662,9 +656,9 @@ def main():
                             viz.update_and_draw()
                             time.sleep(0.1)
                         break
-                    
+
                     time.sleep(0.1)
-                    
+
             except KeyboardInterrupt:
                 print("\nStopped by user")
             except Exception as loop_exc:  # catch other runtime errors inside the loop
@@ -676,35 +670,35 @@ def main():
             print(f"Visualization error: {e}")
             print("Falling back to text-only mode...")
             mode = "1"
-    
+
     if mode == "1":
         # Text-only mode
         print("\n=== Navigation Started (Text Mode) ===\n")
         print("Simulating car movement...\n")
-        
+
         speed = 0.5  # units per second
-        
+
         for i in range(100):
             still_on_route = nav.update_position(speed, dt=0.1)
-            
+
             print(f"Step {i+1}:")
             print(f"  Position: {nav.car_position}")
             print(f"  Remaining distance: {nav.get_remaining_distance():.2f} units")
             print(f"  Speed: {nav.speed:.2f} units/s")
-            
+
             # Check for junction decisions
             junction = nav.get_junction_decision()
             if junction:
                 print(f"  [JUNCTION] {junction.instruction}")
                 print(f"     Direction: {junction.direction}")
                 print(f"     Distance: {junction.distance_to_junction:.2f} units")
-            
+
             print()
-            
+
             if not still_on_route:
                 print("[DONE] Reached destination!")
                 break
-            
+
             time.sleep(0.1)
 
 
@@ -732,6 +726,6 @@ def run_physical_navigation(nav: StandaloneNavigation) -> bool:
 
 if __name__ == "__main__":
     import sys
-    
+
 
     main()
