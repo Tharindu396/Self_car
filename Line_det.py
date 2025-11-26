@@ -1,9 +1,17 @@
 import cv2
-import numpy as np
 import time
 import RPi.GPIO as GPIO
 from MotorModule import Motor 
 import CameraWrapper
+from typing import Optional
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    cv2 = None
+    np = None
 
 motor= Motor(2,3,4,17,22,27)   
 
