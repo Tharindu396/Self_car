@@ -2,7 +2,7 @@ import cv2
 import time
 import RPi.GPIO as GPIO
 from MotorModule import Motor 
-import CameraWrapper
+from CameraWrapper import CameraWrapper
 from typing import Optional
 try:
     import cv2
@@ -53,7 +53,7 @@ class LineFollower:
 
         # Use CameraWrapper for picamera2/OpenCV compatibility
         try:
-            self.camera = CameraWrapper.CameraWrapper(frame_width, frame_height)
+            self.camera = CameraWrapper(frame_width, frame_height)
             self.is_active = self.camera.is_initialized
         except RuntimeError as exc:
             self.camera = None
