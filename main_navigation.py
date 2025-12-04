@@ -11,8 +11,8 @@ from typing import List, Optional, Tuple
 
 from dijikstra_algo import graph, detect_start_node_from_camera
 from standalone_navigation import StandaloneNavigation, NavigationVisualizer
-from CameraWrapper import CameraWrapper
 import Line_det
+from apriltag_scanner import AprilTagDetector
 
 try:
     import cv2
