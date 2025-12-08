@@ -57,11 +57,11 @@ class Motor():
 
         # Left motor (B)
         if rightSpeed > 0:
-            lgpio.gpio_write(self.h, self.In1B, 0)
-            lgpio.gpio_write(self.h, self.In2B, 1)
-        else:
             lgpio.gpio_write(self.h, self.In1B, 1)
             lgpio.gpio_write(self.h, self.In2B, 0)
+        else:
+            lgpio.gpio_write(self.h, self.In1B, 0)
+            lgpio.gpio_write(self.h, self.In2B, 1)
 
         if t is not None and t > 0:
             sleep(t)
