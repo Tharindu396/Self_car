@@ -1,18 +1,25 @@
 """
 Main Navigation System
 
-- Uses Dijkstra shortest path from dijikstra_algo.py
-- Provides visualization/text simulation modes
-- Adds physical navigation mode with contour-based line detection
+Uses navigation package for:
+- Graph-based pathfinding (Dijkstra)
+- Junction detection via visual analysis
+- Physical navigation with line following
 """
 
 import time
-from typing import List, Optional, Tuple
+import sys
+import os
+from typing import List, Optional, Dict, Tuple
 
-from dijikstra_algo import graph, detect_start_node_from_camera
-from standalone_navigation import StandaloneNavigation, NavigationVisualizer
-import Line_det
-from apriltag_scanner import AprilTagDetector
+# Add navigation module to path
+sys.path.insert(0, os.path.dirname(__file__))
+
+from navigation import (
+    Graph,
+    NavigationController,
+    NavigationState
+)
 
 try:
     import cv2
@@ -39,139 +46,93 @@ except Exception as motor_exc:  # pylint: disable=broad-except
     MOTOR_IMPORT_ERROR = motor_exc
 
 try:
-    import pupil_apriltags as apriltag
-    APRILTAG_AVAILABLE = True
+    import Line_det
+    LINE_DET_AVAILABLE = True
 except ImportError:
-    apriltag = None
-    APRILTAG_AVAILABLE = False
-
-class AprilTagDetector:
-    """
-    AprilTag detector for junction identification.
-    Maps tag IDs to junction nodes
-    """
-
-    def __init__(self):
-        if not APRILTAG_AVAILABLE or apriltag is None:
-            self.detector = None
-            self.enabled = False
-            print("[WARN] pupil_apriltags not available. AprilTag detection disabled.")
-        else:
-            try:
-                self.detector = apriltag.Detector()
-                self.enabled = True
-            except Exception as exc:  # pylint: disable=broad-except
-                self.detector = None
-                self.enabled = False
-                print(f"[WARN] Failed to initialize AprilTag detector: {exc}")
-
-        # Map AprilTag ID to junction node name
-        self.tag_to_junction = {
-            1: "J1",
-            2: "J2",
-            3: "J3",
-            4: "J4",
-        }
-
-    def detect_junction(self, frame) -> Optional[str]:
-        """
-        Detect AprilTag in frame and return corresponding junction node.
-
-        Args:
-            frame: OpenCV BGR frame
-
-        Returns:
-            Junction node name (e.g., "J1") if tag detected, None otherwise
-        """
-        if not self.enabled or self.detector is None or frame is None:
-            return None
-
-        try:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            results = self.detector.detect(gray)
-
-            if results:
-                # Get the first (or largest) detected tag
-                tag = results[0]
-                tag_id = tag.tag_id
-
-                if tag_id in self.tag_to_junction:
-                    junction = self.tag_to_junction[tag_id]
-                    return junction
-
-        except Exception as exc:  # pylint: disable=broad-except
-            # Silently fail - don't spam errors during line following
-            pass
-
-        return None
+    Line_det = None
+    LINE_DET_AVAILABLE = False
 
 
 class PhysicalNavigator:
     """
-    Couples the virtual navigation path with real-world line following.
-    Uses AprilTags to identify and verify junction positions.
+    Couples virtual navigation with physical line following.
+    Uses junction detection via image analysis to verify position.
     """
 
     def __init__(
         self,
-        nav: StandaloneNavigation,
-        line_follower: Line_det.LineFollower,
+        nav_controller: NavigationController,
+        line_follower,
         route_speed_units: float = 0.35,
-        visualizer: Optional[NavigationVisualizer] = None,
     ):
-        self.nav = nav
+        """
+        Initialize physical navigator.
+        
+        Args:
+            nav_controller: NavigationController instance
+            line_follower: LineFollower instance for physical movement
+            route_speed_units: Speed for route following
+        """
+        self.nav_controller = nav_controller
         self.line_follower = line_follower
         self.route_speed_units = max(0.1, route_speed_units)
         self._last_instruction: Optional[str] = None
-        self.visualizer = visualizer
-        self.tag_detector = AprilTagDetector()
         self._last_detected_junction: Optional[str] = None
-        self._junction_detection_cooldown = 2.0  # seconds between detections
+        self._junction_detection_cooldown = 2.0  # seconds
         self._last_junction_detection_time = 0.0
 
     def follow_route(self):
+        """Follow the planned navigation route using physical line detection."""
         if not self.line_follower.is_ready:
-            print("Line follower is not ready. Cannot start physical navigation.")
-            return
+            print("[ERROR] Line follower is not ready. Cannot start physical navigation.")
+            return False
 
-        if not self.nav.current_path or len(self.nav.current_path) < 2:
-            print("Route is not set. Please compute a path first.")
-            return
+        if not self.nav_controller.current_path or len(self.nav_controller.current_path) < 2:
+            print("[ERROR] Route not set. Please compute a path first.")
+            return False
 
         print("\n=== Physical Navigation Mode ===")
-        print("Following shortest path using contour-based line detection.")
-        print("Camera windows (Mask and Frame) and navigation map are displayed.")
-        print("Press 'q' in camera window to stop navigation.\n")
-
-        virtual_navigation_complete = False
+        print("Following planned route using line detection.")
+        print(f"Route: {' → '.join(self.nav_controller.current_path)}")
+        print("Press 'q' in camera window to stop.\n")
 
         try:
-            # Follow the planned route segments
-            for idx in range(len(self.nav.current_path) - 1):
-                start_node = self.nav.current_path[idx]
-                end_node = self.nav.current_path[idx + 1]
-                edge_length = self.nav.graph[start_node].get(end_node)
+            # Follow each segment of the path
+            for idx in range(len(self.nav_controller.current_path) - 1):
+                start_node = self.nav_controller.current_path[idx]
+                end_node = self.nav_controller.current_path[idx + 1]
+
+                # Get edge length
+                neighbors = self.nav_controller.graph.neighbors(start_node)
+                edge_length = neighbors.get(end_node)
+
                 if edge_length is None or edge_length <= 0:
-                    print(f"[WARN] Missing edge data for {start_node}->{end_node}. Skipping segment.")
+                    print(f"[WARN] Missing edge data for {start_node}→{end_node}. Skipping.")
                     continue
 
-                print(f"[SEGMENT] {start_node} -> {end_node} ({edge_length:.2f} units)")
-                self._follow_segment(edge_length, stop_on_completion=False)
+                print(f"[SEGMENT] {start_node} → {end_node} ({edge_length:.2f} units)")
+                self._follow_segment(edge_length)
                 print(f"[REACHED] {end_node}")
 
-            print("\n[VIRTUAL NAVIGATION COMPLETE] Destination reached in virtual navigation.")
-            print("[PHYSICAL NAVIGATION] Continuing line following... Press 'q' to stop.\n")
-            virtual_navigation_complete = True
-
-            # Continue physical navigation indefinitely after virtual navigation completes
-            self._continue_physical_navigation()
+            print("\n[SUCCESS] Navigation route complete!")
+            print("[INFO] Continuing line following. Press 'q' to stop.\n")
+            self._continue_line_following()
 
         except KeyboardInterrupt:
-            print("\n[STOP] Interrupted by user")
+            print("\n[STOP] Navigation interrupted by user")
+            return False
         finally:
             self.line_follower.cleanup()
+        
+        return True
 
-    def _follow_segment(self, edge_length: float, stop_on_completion: bool = True):
+    def _follow_segment(self, edge_length: float):
+        """
+        Follow a single segment of the path.
+        
+        Args:
+            edge_length: Length of the segment to follow
+        """
         target_duration = edge_length / self.route_speed_units
         target_duration = max(target_duration, 0.1)
 
@@ -186,278 +147,180 @@ class PhysicalNavigator:
             if dt <= 0:
                 continue
 
-            # Process line following and motor control
+            # Perform line following
             self.line_follower.step()
 
-            # Display camera windows (mask and frame)
+            # Display camera frames
             self.line_follower.display_frames()
 
-            # Update navigation position (only if stop_on_completion is True)
-            if stop_on_completion:
-                still_on_route = self.nav.update_position(self.route_speed_units, dt)
-            else:
-                # Still update position for visualization, but don't stop on completion
-                still_on_route = self.nav.update_position(self.route_speed_units, dt)
-
-            # Check for AprilTag junction detection
-            self._check_apriltag_junction()
-
-            self._report_junction()
-            self._update_visualizer()
+            # Check for junction detection
+            frame = self.line_follower.get_last_frame()
+            if frame is not None:
+                detected_junction = self.nav_controller.detect_junction(frame)
+                if detected_junction and detected_junction.get('node'):
+                    junction_node = detected_junction['node']
+                    if junction_node in self.nav_controller.current_path:
+                        print(f"[JUNCTION DETECTED] {junction_node}")
+                        break
 
             # Check for quit key
             if CV2_AVAILABLE and cv2 is not None:
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
-                    print("\n[STOP] User pressed 'q' to quit")
                     raise KeyboardInterrupt("User quit")
 
-            if stop_on_completion and not still_on_route:
+            # Check if segment duration exceeded
+            if (now - start_time) >= target_duration:
                 break
 
-            if stop_on_completion and (now - start_time) >= target_duration:
-                break
+            time.sleep(0.01)
 
-    def _continue_physical_navigation(self):
-        """
-        Continue physical line following indefinitely after virtual navigation completes.
-        Camera windows and visualization remain active.
-        """
-        print("[PHYSICAL NAVIGATION] Line following active. Press 'q' to stop.\n")
-
+    def _continue_line_following(self):
+        """Continue line following indefinitely after route completion."""
         while True:
-            # Process line following and motor control
             self.line_follower.step()
-
-            # Display camera windows (mask and frame)
             self.line_follower.display_frames()
-
-            # Update visualizer (keep showing final position)
-            self._update_visualizer()
 
             # Check for quit key
             if CV2_AVAILABLE and cv2 is not None:
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
-                    print("\n[STOP] User pressed 'q' to quit")
+                    print("\n[STOP] User quit line following")
                     break
 
-            # Small delay to prevent excessive CPU usage
             time.sleep(0.01)
-
-    def _check_apriltag_junction(self):
-        """
-        Check for AprilTag detection and update navigation position if junction detected.
-        Uses cooldown to prevent duplicate detections.
-        """
-        current_time = time.time()
-
-        # Cooldown to prevent rapid re-detection of same tag
-        if current_time - self._last_junction_detection_time < self._junction_detection_cooldown:
-            return
-
-        frame = self.line_follower.get_last_frame()
-        if frame is None:
-            return
-
-        detected_junction = self.tag_detector.detect_junction(frame)
-
-        if detected_junction and detected_junction != self._last_detected_junction:
-            self._last_detected_junction = detected_junction
-            self._last_junction_detection_time = current_time
-
-            # Verify this junction is in our path
-            if self.nav.current_path and detected_junction in self.nav.current_path:
-                # Update car position to this junction
-                self._update_position_to_junction(detected_junction)
-                print(f"[APRILTAG] Detected junction: {detected_junction}")
-
-    def _update_position_to_junction(self, junction_node: str):
-        """
-        Update navigation position to match detected AprilTag junction.
-        This corrects any drift in the virtual position.
-        """
-        if not self.nav.current_path or junction_node not in self.nav.current_path:
-            return
-
-        # Find the junction in the path
-        junction_idx = self.nav.current_path.index(junction_node)
-
-        # Update car position to be at this junction with 0 progress
-        if self.nav.car_position is None:
-            return
-
-        self.nav.car_position.node = junction_node
-        self.nav.car_position.progress = 0.0
-
-        # Update heading based on next node in path
-        if junction_idx + 1 < len(self.nav.current_path):
-            next_node = self.nav.current_path[junction_idx + 1]
-            self.nav.car_position.heading = self.nav._calculate_heading(junction_node, next_node)
-
-        print(f"[POSITION CORRECTED] Car position updated to {junction_node}")
-
-    def _report_junction(self):
-        junction = self.nav.get_junction_decision()
-        if junction and junction.instruction != self._last_instruction:
-            print(f"[JUNCTION] {junction.instruction} ({junction.direction})")
-            self._last_instruction = junction.instruction
-
-    def _update_visualizer(self):
-        if self.visualizer:
-            try:
-                self.visualizer.update_and_draw()
-            except Exception as exc:  # pylint: disable=broad-except
-                print(f"[WARN] Visualizer update failed: {exc}")
-                self.visualizer = None
 
 
 def main():
-    """Main navigation function"""
+    """Main navigation entry point."""
     print("=== RPI Car Navigation System ===\n")
-    print("This system uses:")
-    print("  - dijkstra_algo.py for pathfinding")
-    print("  - OCR to detect start position")
-    print("  - Real-time position tracking")
-    print("  - Junction decision making\n")
+    print("Navigation modes:")
+    print("  1. Text simulation (console output)")
+    print("  2. Physical car (line detection + motors)")
+    print("")
 
-    # Initialize navigation
-    nav = StandaloneNavigation()
+    # Get graph path
+    graph_path = input("Enter graph JSON file path [graph.json]: ").strip()
+    if not graph_path:
+        graph_path = "graph.json"
 
-    # Option 1: Use OCR to detect start node
-    print("Step 1: Detecting start position...")
-    start = detect_start_node_from_camera()
+    # Load graph
+    try:
+        graph = Graph.from_json(graph_path)
+        print(f"✓ Graph loaded: {len(graph.nodes())} nodes")
+        print(f"  Available nodes: {', '.join(sorted(graph.nodes())[:10])}")
+    except FileNotFoundError:
+        print(f"✗ Graph file not found: {graph_path}")
+        return
+    except Exception as e:
+        print(f"✗ Error loading graph: {e}")
+        return
 
-    # Option 2: Manual input if OCR fails
-    if start is None or start not in graph:
-        print("\nOCR detection failed or invalid. Using manual input.")
-        start = input("Enter start node (e.g., A, B, J1): ").strip().upper()
+    # Get start node
+    start = input("Enter start node: ").strip().upper()
+    if start not in graph.nodes():
+        print(f"✗ Invalid start node: {start}")
+        return
 
-    # Get destination
-    print("\nStep 2: Enter destination")
-    goal = input("Enter destination node (e.g., D, F, J4): ").strip().upper()
-
-    # Set route
-    print("\nStep 3: Calculating route...")
-    if not nav.set_route(start, goal):
-        print("Failed to set route. Exiting.")
+    # Get goal node
+    goal = input("Enter goal node: ").strip().upper()
+    if goal not in graph.nodes():
+        print(f"✗ Invalid goal node: {goal}")
         return
 
     # Choose mode
-    print("\nStep 4: Choose run mode")
-    print("  1. Text-only (console output)")
-    print("  2. Visualization (Uber-style map)")
-    print("  3. Physical car (line detection + motors)")
-    mode = input("Enter choice (1, 2, or 3): ").strip()
-
-    if mode == "3":
-        if run_physical_navigation(nav):
-            return
-        print("Physical mode unavailable. Falling back to text-only mode.\n")
-        mode = "1"
+    print("\nSelect mode:")
+    print("  1. Text simulation")
+    print("  2. Physical navigation")
+    mode = input("Enter choice (1 or 2): ").strip()
 
     if mode == "2":
-        # Visualization mode
-        try:
-            viz = NavigationVisualizer(nav)
-            print("\nVisualization window opened.")
-            print("The window shows:")
-            print("  - Blue line: Planned route")
-            print("  - Red triangle: Your car position")
-            print("  - Green circle: Destination")
-            print("  - Orange circles: Junctions")
-            print("  - Yellow boxes: Junction instructions")
-            print("\nClose the window to stop.\n")
-
-            # Simulate car movement
-            speed = 0.5  # units per second
-            running = True
-
-            try:
-                while running:
-                    still_on_route = nav.update_position(speed, dt=0.1)
-
-                    # Get junction decision
-                    junction = nav.get_junction_decision()
-                    if junction:
-                        print(f"[JUNCTION] {junction.instruction}")
-
-                    # Update visualization
-                    viz.update_and_draw()
-
-                    if not still_on_route:
-                        print("\n[DONE] Reached destination!")
-                        # Keep showing final state
-                        for _ in range(20):
-                            viz.update_and_draw()
-                            time.sleep(0.1)
-                        break
-
-                    time.sleep(0.1)
-
-            except KeyboardInterrupt:
-                print("\nStopped by user")
-            except Exception as loop_exc:  # catch other runtime errors inside the loop
-                print(f"[WARN] Visualization loop error: {loop_exc}")
-            finally:
-                import matplotlib.pyplot as plt
-                plt.close('all')
-        except Exception as e:
-            print(f"Visualization error: {e}")
-            print("Falling back to text-only mode...")
+        if not run_physical_navigation(graph, start, goal):
             mode = "1"
 
     if mode == "1":
-        # Text-only mode
-        print("\n=== Navigation Started (Text Mode) ===\n")
-        print("Simulating car movement...\n")
-
-        speed = 0.5  # units per second
-
-        for i in range(100):
-            still_on_route = nav.update_position(speed, dt=0.1)
-
-            print(f"Step {i+1}:")
-            print(f"  Position: {nav.car_position}")
-            print(f"  Remaining distance: {nav.get_remaining_distance():.2f} units")
-            print(f"  Speed: {nav.speed:.2f} units/s")
-
-            # Check for junction decisions
-            junction = nav.get_junction_decision()
-            if junction:
-                print(f"  [JUNCTION] {junction.instruction}")
-                print(f"     Direction: {junction.direction}")
-                print(f"     Distance: {junction.distance_to_junction:.2f} units")
-
-            print()
-
-            if not still_on_route:
-                print("[DONE] Reached destination!")
-                break
-
-            time.sleep(0.1)
+        run_text_simulation(graph, start, goal)
 
 
-def run_physical_navigation(nav: StandaloneNavigation) -> bool:
-    """Start physical navigation mode if hardware is ready."""
-    try:
-        follower = Line_det.LineFollower()
-    except RuntimeError as exc:
-        print(f"[ERROR] {exc}")
+def run_text_simulation(graph: Graph, start: str, goal: str):
+    """Run text-only navigation simulation."""
+    print("\n=== Text Simulation Mode ===\n")
+
+    # Initialize navigation
+    nav_controller = NavigationController("graph.json")
+
+    # Start navigation
+    if not nav_controller.start_navigation(start, goal):
+        print("Failed to start navigation.")
+        return
+
+    print(f"\nPath: {' → '.join(nav_controller.current_path)}")
+    print(f"Total distance: {nav_controller.pathfinder.get_total_distance(nav_controller.current_path):.2f} units\n")
+
+    # Simulate navigation
+    for step in range(100):
+        status = nav_controller.update_position(nav_controller.current_path[min(step // 10, len(nav_controller.current_path) - 1)])
+
+        print(f"Step {step + 1}:")
+        print(f"  State: {nav_controller.state.value}")
+        print(f"  Current node: {nav_controller.current_node}")
+        print(f"  Path index: {nav_controller.path_index}")
+
+        if nav_controller.state == NavigationState.REACHED_GOAL:
+            print("\n✓ Navigation complete!")
+            break
+
+        time.sleep(0.2)
+
+
+def run_physical_navigation(graph: Graph, start: str, goal: str) -> bool:
+    """
+    Run physical navigation with line detection.
+    
+    Args:
+        graph: Navigation graph
+        start: Start node
+        goal: Goal node
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    if not LINE_DET_AVAILABLE or Line_det is None:
+        print("✗ Line_det module not available")
         return False
 
-    visualizer = None
     try:
-        visualizer = NavigationVisualizer(nav)
-        print("[INFO] Uber-style map visualization enabled.")
-        print("[INFO] Camera windows (Mask and Frame) will be displayed.")
-    except Exception as viz_exc:  # pylint: disable=broad-except
-        print(f"[WARN] Could not start visualization: {viz_exc}")
-        print("[INFO] Camera windows will still be displayed.")
+        line_follower = Line_det.LineFollower()
+    except Exception as e:
+        print(f"✗ Error initializing line follower: {e}")
+        return False
 
-    driver = PhysicalNavigator(nav, follower, visualizer=visualizer)
-    driver.follow_route()
-    return True
+    try:
+        # Initialize navigation controller
+        nav_controller = NavigationController("graph.json")
+
+        # Start navigation
+        if not nav_controller.start_navigation(start, goal):
+            print("✗ Failed to start navigation")
+            return False
+
+        # Initialize physical navigator
+        driver = PhysicalNavigator(nav_controller, line_follower)
+
+        # Follow route
+        success = driver.follow_route()
+        return success
+
+    except Exception as e:
+        print(f"✗ Physical navigation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        try:
+            line_follower.cleanup()
+        except:
+            pass
 
 
 if __name__ == "__main__":
